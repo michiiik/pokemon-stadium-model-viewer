@@ -1,0 +1,11 @@
+{
+  "format": "pokemon-stadium-model-viewer-config-v1",
+  "providers": {
+    "stadium1": {
+      "assets": "../pokemon-stadium-assets/stadium1/pokemon_models"
+    },
+    "stadium2": {
+      "assets": "../pokemon-stadium-assets/stadium2"
+    }
+  }
+}
