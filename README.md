@@ -40,10 +40,10 @@ This does the following:
 
 When a direct Stadium 2 ROM is opened, the viewer normalizes and reads that ROM
 once per process, reuses the shared buffer for both banks, and stores a
-SHA-256-keyed catalog cache under the operating system cache directory. The
-derived cache contains catalog metadata only, not ROM bytes; it is automatically
-invalidated when the ROM changes. Loaded models are also reused for the lifetime
-of the server.
+SHA-256-keyed catalog and parsed-model cache under the operating system
+cache directory. The derived cache contains model geometry, textures, and
+animation JSON, but never ROM bytes; it is automatically invalidated when the
+ROM changes. Loaded models are also reused for the lifetime of the server.
 
 To use an existing Stadium 2 cache:
 

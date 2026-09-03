@@ -52,6 +52,7 @@ STADIUM2_ARCHIVE_ENTRY_SIZE = 0x10
 STADIUM1_MODEL_ARCHIVE_ROM_START = 0x00920000
 STADIUM1_MODEL_ARCHIVE_ROM_END = 0x015C0000
 STADIUM2_CATALOG_CACHE_FORMAT = "pms-stadium2-catalog-v1"
+STADIUM2_MODEL_CACHE_FORMAT = "pms-stadium2-model-v1"
 
 N64_ROM_MAGIC_Z64 = b"\x80\x37\x12\x40"
 N64_ROM_MAGIC_V64 = b"\x37\x80\x40\x12"
@@ -2084,6 +2085,7 @@ class Stadium2DataProvider:
         self._rom_blob: Optional[bytes] = None
         self._rom_sha256: Optional[str] = None
         self._catalog_cache_path: Optional[Path] = None
+        self._model_cache_dir: Optional[Path] = None
         self._model_archive: Optional[Dict[str, Any]] = None
         self._pose_archive: Optional[Dict[str, Any]] = None
         self._model_blob: Optional[bytes] = None
@@ -2235,7 +2237,9 @@ class Stadium2DataProvider:
         if self._rom_blob is None:
             self._rom_blob = normalize_n64_rom(path.read_bytes())
             self._rom_sha256 = hashlib.sha256(self._rom_blob).hexdigest()
-            self._catalog_cache_path = derived_cache_dir() / f"stadium2-catalog-{self._rom_sha256}.json"
+            cache_root = derived_cache_dir()
+            self._catalog_cache_path = cache_root / f"stadium2-catalog-{self._rom_sha256}.json"
+            self._model_cache_dir = cache_root / f"stadium2-models-{self._rom_sha256}"
         return self._rom_blob
 
     @staticmethod
@@ -2464,6 +2468,50 @@ class Stadium2DataProvider:
                 "message": f"could not write derived catalog cache: {exc}",
             })
 
+    def _model_cache_path(self, index: int) -> Optional[Path]:
+        if self._model_cache_dir is None:
+            return None
+        return self._model_cache_dir / f"model-{index:03d}.json"
+
+    def _load_model_cache(self, reference: str, index: int) -> Optional[Dict[str, Any]]:
+        path = self._model_cache_path(index)
+        if path is None or not path.is_file() or not self._rom_sha256:
+            return None
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            model = cached.get("model") if isinstance(cached, dict) else None
+            if (not isinstance(cached, dict)
+                    or cached.get("format") != STADIUM2_MODEL_CACHE_FORMAT
+                    or cached.get("sourceSha256") != self._rom_sha256
+                    or cached.get("reference") != reference
+                    or not isinstance(model, dict)
+                    or not isinstance(model.get("animations"), list)):
+                return None
+            return dict(model)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _save_model_cache(self, reference: str, index: int, model: Dict[str, Any]) -> None:
+        path = self._model_cache_path(index)
+        if path is None or not self._rom_sha256:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "format": STADIUM2_MODEL_CACHE_FORMAT,
+                "sourceSha256": self._rom_sha256,
+                "reference": reference,
+                "model": model,
+            }
+            temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(path)
+        except (OSError, TypeError, ValueError) as exc:
+            self.diagnostics.append({
+                "severity": "warning", "code": "s2-model-cache-write",
+                "message": f"could not write derived model cache: {exc}",
+            })
+
     def catalog(self) -> List[Dict[str, Any]]:
         if self._catalog_cache is not None:
             return self._catalog_cache
@@ -2540,6 +2588,10 @@ class Stadium2DataProvider:
         if reference in self._model_cache:
             return self._model_cache[reference]
         index = self._reference_index(reference)
+        cached = self._load_model_cache(reference, index)
+        if cached is not None:
+            self._model_cache[reference] = cached
+            return cached
         blob, item = self._entry_blob(index)
         decoded = self._decoded_model_blob(blob)
         model = parse_resource(decoded, f"Stadium 2 model {index:03d}")
@@ -2561,6 +2613,7 @@ class Stadium2DataProvider:
         model["animationSlotCount"] = int(model.get("animationSlotCount", 0) or 0)
         model.setdefault("diagnostics", []).extend(self._model_diagnostics(index))
         self._model_cache[reference] = model
+        self._save_model_cache(reference, index, model)
         return model
 
 

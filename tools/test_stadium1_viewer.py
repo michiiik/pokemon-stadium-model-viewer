@@ -219,6 +219,27 @@ class Stadium1ViewerChecks(unittest.TestCase):
         model = viewer.parse_resource(decoded, "packed S2 model", catalog_only=True)
         self.assertEqual(viewer.Stadium2DataProvider._animation_slot_indices(model, decoded), [0])
 
+    def test_stadium2_model_cache_persists_animations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = object.__new__(viewer.Stadium2DataProvider)
+            provider._model_cache_dir = Path(temporary)
+            provider._rom_sha256 = "fixture-rom"
+            provider.diagnostics = []
+            model = {
+                "kind": "model",
+                "name": "fixture",
+                "animations": [{"id": 0, "name": "pose_000", "frameCount": 12, "supported": True}],
+            }
+            provider._save_model_cache("s2-model:003", 3, model)
+
+            restored = object.__new__(viewer.Stadium2DataProvider)
+            restored._model_cache_dir = Path(temporary)
+            restored._rom_sha256 = "fixture-rom"
+            self.assertEqual(restored._load_model_cache("s2-model:003", 3), model)
+
+            restored._rom_sha256 = "different-rom"
+            self.assertIsNone(restored._load_model_cache("s2-model:003", 3))
+
     def test_binarchive(self) -> None:
         blob = bytearray(0x24)
         put_u32(blob, 8, len(blob))
