@@ -13,7 +13,7 @@ extracted game data, local paths, screenshots, and caches stay outside Git.
 - A modern browser with WebGL support
 - Node.js 18 or newer for the JavaScript checks only
 - A legally obtained ROM or an existing extraction
-- Stadium 1 currently needs an extracted pokemon_models directory
+- Stadium 1 can read a user-owned .z64/.n64/.v64/.rom image directly, or an extracted pokemon_models directory
 - Stadium 2 can be extracted directly from a user-owned ROM
 
 No Python packages or frontend build step are required.
@@ -27,12 +27,12 @@ Run these commands from the repository root.
 For both providers:
 
 ~~~powershell
-py -3 tools\setup_viewer.py --stadium1-assets "C:\path\to\pokemon_models" --stadium2-rom "C:\path\to\pokemon-stadium-2.z64"
+py -3 tools\setup_viewer.py --stadium1-rom "C:\path\to\pokemon-stadium-1.z64" --stadium2-rom "C:\path\to\pokemon-stadium-2.z64"
 ~~~
 
 This does the following:
 
-- References the Stadium 1 extraction without copying it.
+- Reads the source-defined Stadium 1 model archive directly from the ROM without copying it.
 - Reads the Stadium 2 ROM and writes decoded model/pose data to the operating
   system's application cache.
 - Creates the ignored viewer.local.json.
@@ -41,7 +41,7 @@ This does the following:
 To use an existing Stadium 2 cache:
 
 ~~~powershell
-py -3 tools\setup_viewer.py --stadium1-assets "C:\path\to\pokemon_models" --stadium2-cache "C:\path\outside\this\repo\stadium2"
+py -3 tools\setup_viewer.py --stadium1-rom "C:\path\to\pokemon-stadium-1.z64" --stadium2-cache "C:\path\outside\this\repo\stadium2"
 ~~~
 
 To choose a different extraction location, add --cache-dir to the ROM
@@ -70,6 +70,13 @@ py -3 tools\stadium1_viewer.py --config viewer.local.json --provider stadium2 --
 
 Explicit --assets paths are also supported and override the config for a
 single-provider launch.
+
+For a one-off dual launch without writing a config file, pass both ROMs or
+external asset roots directly:
+
+~~~powershell
+py -3 tools\stadium1_viewer.py --dual --stadium1-rom "C:\path\to\pokemon-stadium-1.z64" --stadium2-rom "C:\path\to\pokemon-stadium-2.z64" --open
+~~~
 
 Stop the server with Ctrl+C. On Windows, stop_viewer.bat is a convenience
 helper for the default port.
@@ -139,9 +146,9 @@ provider and its extracted manifest.
 
 Unknown or unsupported structures are reported as resource diagnostics where
 possible. This is an inspection tool, not a full emulator, ROM loader, or
-complete replacement for the game's N64 renderer. Stadium 1 remains
-extraction-directory based; do not assume that passing a full Stadium 1 ROM
-will work.
+complete replacement for the game's N64 renderer. Direct Stadium 1 ROM access
+currently targets the source-defined US model archive; use an extracted
+pokemon_models directory when working with a different build or region.
 
 ## Controls
 

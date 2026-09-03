@@ -7,7 +7,7 @@ set "PORT=8767"
 
 if not exist "%CONFIG%" (
   echo No viewer.local.json found.
-  echo Run: py -3 tools\setup_viewer.py --stadium1-assets "path\to\pokemon_models" --stadium2-rom "path\to\stadium2.z64"
+  echo Run: py -3 tools\setup_viewer.py --stadium1-rom "path\to\pokemon-stadium-1.z64" --stadium2-rom "path\to\stadium2.z64"
   exit /b 2
 )
 

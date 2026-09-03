@@ -7,10 +7,10 @@ server process.
 Create or refresh the ignored config from the repository root:
 
 ~~~powershell
-py -3 tools\setup_viewer.py --stadium1-assets "C:\path\to\pokemon_models" --stadium2-rom "C:\path\to\pokemon-stadium-2.z64"
+py -3 tools\setup_viewer.py --stadium1-rom "C:\path\to\pokemon-stadium-1.z64" --stadium2-rom "C:\path\to\pokemon-stadium-2.z64"
 ~~~
 
-The helper writes viewer.local.json and stores the Stadium 2 extraction
+The helper writes viewer.local.json, references the Stadium 1 ROM directly, and stores the Stadium 2 extraction
 cache outside the repository. Use --cache-dir "C:\path\outside\this\repo" to
 choose another external cache location. Use --force to refresh an existing
 cache.

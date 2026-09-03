@@ -48,6 +48,33 @@ STADIUM2_MODEL_TABLE_ROM_END = STADIUM2_POSE_TABLE_ROM_OFFSET
 STADIUM2_MODEL_COUNT_EXPECTED = 282
 STADIUM2_ARCHIVE_HEADER_SIZE = 0x10
 STADIUM2_ARCHIVE_ENTRY_SIZE = 0x10
+STADIUM1_MODEL_ARCHIVE_ROM_START = 0x00920000
+STADIUM1_MODEL_ARCHIVE_ROM_END = 0x015C0000
+
+N64_ROM_MAGIC_Z64 = b"\x80\x37\x12\x40"
+N64_ROM_MAGIC_V64 = b"\x37\x80\x40\x12"
+N64_ROM_MAGIC_N64 = b"\x40\x12\x37\x80"
+
+
+def normalize_n64_rom(data: bytes) -> bytes:
+    """Return a big-endian ROM image from z64, v64, or n64 byte order."""
+    if len(data) < 4:
+        raise FormatError("ROM is too short to contain an N64 header")
+    magic = data[:4]
+    if magic == N64_ROM_MAGIC_Z64:
+        return data
+    if magic == N64_ROM_MAGIC_V64:
+        if len(data) % 2:
+            raise FormatError("byte-swapped N64 ROM has an odd length")
+        return b"".join(data[offset + 1:offset + 2] + data[offset:offset + 1]
+                        for offset in range(0, len(data), 2))
+    if magic == N64_ROM_MAGIC_N64:
+        if len(data) % 4:
+            raise FormatError("word-swapped N64 ROM length is not a multiple of four")
+        return b"".join(data[offset + 3:offset + 4] + data[offset + 2:offset + 3]
+                        + data[offset + 1:offset + 2] + data[offset:offset + 1]
+                        for offset in range(0, len(data), 4))
+    raise FormatError("unsupported N64 ROM byte order; expected z64, v64, or n64 format")
 STADIUM2_EXTRACT_FORMAT = "pms-stadium2-extract-v1"
 VIEWER_CONFIG_FORMAT = "pokemon-stadium-model-viewer-config-v1"
 
@@ -1802,6 +1829,99 @@ class Stadium1DataProvider:
         return model
 
 
+class Stadium1RomDataProvider(Stadium1DataProvider):
+    """Provider for the source-defined Stadium 1 model archive inside a ROM."""
+
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        if not self.root.is_file():
+            raise FileNotFoundError(f"Stadium 1 ROM not found: {self.root}")
+        data = normalize_n64_rom(self.root.read_bytes())
+        data = data[STADIUM1_MODEL_ARCHIVE_ROM_START:STADIUM1_MODEL_ARCHIVE_ROM_END]
+        if len(data) != STADIUM1_MODEL_ARCHIVE_ROM_END - STADIUM1_MODEL_ARCHIVE_ROM_START:
+            raise FormatError(
+                f"{self.root.name} is shorter than the Stadium 1 model archive section "
+                f"(0x{STADIUM1_MODEL_ARCHIVE_ROM_END:X} bytes required)"
+            )
+        archive = parse_archive(data)
+        if archive is None:
+            raise FormatError(
+                f"{self.root.name} has no valid Stadium 1 BinArchive at "
+                f"ROM 0x{STADIUM1_MODEL_ARCHIVE_ROM_START:X}"
+            )
+        self._archive_blob = data
+        self._model_archive = archive
+        self._catalog_cache: Optional[List[Dict[str, Any]]] = None
+
+    def _reference_index(self, reference: str) -> int:
+        if not reference.startswith("s1-rom:"):
+            raise ValueError("Stadium 1 ROM model references must use s1-rom:NNN")
+        value = reference.split(":", 1)[1]
+        if not value.isdigit():
+            raise ValueError(f"invalid Stadium 1 ROM model reference {reference}")
+        index = int(value)
+        if index < 0 or index >= self._model_archive["fileCount"]:
+            raise IndexError(f"Stadium 1 ROM model index {index} is out of range")
+        return index
+
+    def _entry_blob(self, index: int) -> Tuple[bytes, Dict[str, Any]]:
+        item = self._model_archive["files"][index]
+        return (
+            self._archive_blob[item["offset"]:item["offset"] + item["size"]],
+            item,
+        )
+
+    def catalog(self) -> List[Dict[str, Any]]:
+        if self._catalog_cache is not None:
+            return self._catalog_cache
+        entries: List[Dict[str, Any]] = []
+        for item in self._model_archive["files"]:
+            index = int(item["index"])
+            reference = f"s1-rom:{index:03d}"
+            try:
+                child, _ = self._entry_blob(index)
+                parsed = parse_resource(child, reference, catalog_only=True)
+                if parsed.get("kind") != "model" or not stadium1_model_id_supported(parsed):
+                    continue
+                model_id = int(parsed["modelId"])
+                identity = model_identity("stadium1", model_id, reference, stadium1_model_name(model_id, reference))
+                entries.append({
+                    "kind": "model", **identity, "path": reference,
+                    "size": item["size"], "animations": summarize_animations(parsed),
+                    "diagnostics": parsed.get("diagnostics", []),
+                })
+            except Exception as exc:
+                entries.append({
+                    "kind": "resource", "provider": "stadium1", "providerAlias": "s1",
+                    "name": reference, "path": reference, "size": item["size"],
+                    "animations": [],
+                    "diagnostics": [{"severity": "error", "code": "catalog-failed", "message": str(exc)}],
+                })
+        self._catalog_cache = sorted(entries, key=lambda item: item["name"].lower())
+        return self._catalog_cache
+
+    def load_model(self, reference: str) -> Dict[str, Any]:
+        index = self._reference_index(reference)
+        data, item = self._entry_blob(index)
+        model = parse_resource(data, reference)
+        if model.get("kind") != "model":
+            raise FormatError(f"Stadium 1 ROM record {index} did not decode as a model")
+        if not stadium1_model_id_supported(model):
+            raise FormatError(
+                f"Stadium 1 provider accepts model IDs {STADIUM1_MODEL_ID_MIN}..{STADIUM1_MODEL_ID_MAX}; "
+                f"resource has model ID {model.get('modelId', 'unknown')}"
+            )
+        model_id = int(model["modelId"])
+        identity = model_identity("stadium1", model_id, reference, stadium1_model_name(model_id, reference))
+        model.update(identity)
+        model["name"] = identity["name"]
+        model["s1RomRecord"] = {
+            "index": index,
+            "romOffset": STADIUM1_MODEL_ARCHIVE_ROM_START + int(item["offset"]),
+            "size": int(item["size"]),
+        }
+        return model
+
 def inspect_stadium2_pose_metadata(data: bytes, name: str = "Stadium 2 pose") -> Dict[str, Any]:
     """Inspect the repeated S2 pose trailer without claiming curve decoding.
 
@@ -2392,7 +2512,7 @@ def _configured_asset(config: Dict[str, Any], provider: str) -> Optional[str]:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        asset = value.get("assets", value.get("cache"))
+        asset = value.get("assets", value.get("cache", value.get("rom")))
         if isinstance(asset, str):
             return asset
     return None
@@ -2525,15 +2645,31 @@ def run_server(args: argparse.Namespace) -> None:
             )
         return Path(value).resolve()
 
+    def stadium1_provider(path: Path) -> Stadium1DataProvider:
+        if path.is_file() and path.suffix.casefold() in (".z64", ".n64", ".v64", ".rom"):
+            return Stadium1RomDataProvider(path)
+        return Stadium1DataProvider(path)
+
     if args.dual:
+        if args.stadium1_rom and args.stadium1_assets:
+            raise ValueError("use only one of --stadium1-rom and --stadium1-assets")
+        if args.stadium2_rom and args.stadium2_assets:
+            raise ValueError("use only one of --stadium2-rom and --stadium2-assets")
+        s1_explicit = args.stadium1_rom or args.stadium1_assets
+        s2_explicit = args.stadium2_rom or args.stadium2_assets
         providers = {
-            "stadium1": Stadium1DataProvider(asset_path("stadium1", args.stadium1_assets)),
-            "stadium2": Stadium2DataProvider(asset_path("stadium2", args.stadium2_assets)),
+            "stadium1": stadium1_provider(asset_path("stadium1", s1_explicit)),
+            "stadium2": Stadium2DataProvider(asset_path("stadium2", s2_explicit)),
         }
         provider = providers[args.provider]
     else:
-        root = asset_path(args.provider, args.assets)
-        provider = Stadium2DataProvider(root) if args.provider == "stadium2" else Stadium1DataProvider(root)
+        if args.provider == "stadium1" and args.stadium1_rom and args.assets:
+            raise ValueError("use only one of --stadium1-rom and --assets")
+        if args.provider == "stadium2" and args.stadium2_rom and args.assets:
+            raise ValueError("use only one of --stadium2-rom and --assets")
+        explicit = args.stadium1_rom if args.provider == "stadium1" else args.stadium2_rom or args.assets
+        root = asset_path(args.provider, explicit)
+        provider = stadium1_provider(root) if args.provider == "stadium1" else Stadium2DataProvider(root)
         providers = {provider.game_id: provider}
     server = http.server.ThreadingHTTPServer((args.host, args.port), ViewerHandler)
     server.provider = provider  # type: ignore[attr-defined]
@@ -2556,12 +2692,14 @@ def run_server(args: argparse.Namespace) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run the dependency-free Pokémon Stadium model/animation viewer")
     parser.add_argument("--assets", help="asset directory or a single model/archive file")
+    parser.add_argument("--stadium1-rom", help="user-owned Stadium 1 .z64/.n64/.v64/.rom image")
     parser.add_argument("--config", help="local JSON file containing external provider asset paths")
     parser.add_argument("--provider", choices=("stadium1", "stadium2"), default="stadium1",
                         help="game-specific provider; Stadium 2 decodes model poses through the shared curve evaluator")
     parser.add_argument("--dual", action="store_true", help="serve Stadium 1 and Stadium 2 in separate viewer tabs")
     parser.add_argument("--stadium1-assets", help="Stadium 1 assets for --dual")
     parser.add_argument("--stadium2-assets", help="Stadium 2 extraction cache for --dual")
+    parser.add_argument("--stadium2-rom", help="user-owned Stadium 2 .z64/.n64/.rom image")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true", help="open the viewer in the default browser")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a local viewer config and optionally extract a user-owned S2 ROM.
+"""Create a local viewer config and optionally prepare user-owned ROM assets.
 
 The generated config and extraction cache are intentionally external to Git.
 This helper never copies a ROM into the repository and never uploads anything.
@@ -43,12 +43,14 @@ def existing_provider_paths(config_path: Path) -> Dict[str, str]:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Configure external assets and optionally extract a user-owned Stadium 2 ROM"
+        description="Configure external assets and optionally prepare user-owned Stadium ROMs"
     )
-    parser.add_argument("--stadium1-assets", help="external extracted Stadium 1 pokemon_models directory")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--stadium2-rom", help="user-owned Stadium 2 ROM or extracted model-bank input")
-    group.add_argument("--stadium2-cache", help="existing external Stadium 2 extraction cache")
+    stadium1 = parser.add_mutually_exclusive_group()
+    stadium1.add_argument("--stadium1-assets", help="external extracted Stadium 1 pokemon_models directory")
+    stadium1.add_argument("--stadium1-rom", help="user-owned Stadium 1 .z64/.n64/.v64/.rom image")
+    stadium2 = parser.add_mutually_exclusive_group()
+    stadium2.add_argument("--stadium2-rom", help="user-owned Stadium 2 ROM or extracted model-bank input")
+    stadium2.add_argument("--stadium2-cache", help="existing external Stadium 2 extraction cache")
     parser.add_argument("--cache-dir", help="external output directory for a new Stadium 2 extraction")
     parser.add_argument("--config", default="viewer.local.json", help="ignored local config to write")
     parser.add_argument("--force", action="store_true", help="refresh an existing Stadium 2 cache")
@@ -58,8 +60,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     config_path = Path(args.config).expanduser().resolve()
     try:
         paths = existing_provider_paths(config_path)
-        if args.stadium1_assets:
+        kinds: Dict[str, str] = {}
+        if args.stadium1_rom:
+            paths["stadium1"] = str(Path(args.stadium1_rom).expanduser().resolve())
+            kinds["stadium1"] = "rom"
+        elif args.stadium1_assets:
             paths["stadium1"] = str(Path(args.stadium1_assets).expanduser().resolve())
+            kinds["stadium1"] = "assets"
 
         if args.stadium2_rom:
             cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else default_cache_dir().resolve()
@@ -71,15 +78,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"{manifest['poseRecordCount']} pose records -> {cache_dir}"
             )
             paths["stadium2"] = str(cache_dir)
+            kinds["stadium2"] = "cache"
         elif args.stadium2_cache:
             paths["stadium2"] = str(Path(args.stadium2_cache).expanduser().resolve())
+            kinds["stadium2"] = "cache"
+        elif args.cache_dir:
+            raise ValueError("--cache-dir requires --stadium2-rom")
 
         if not paths:
-            raise ValueError("provide --stadium1-assets, --stadium2-rom, or --stadium2-cache")
+            raise ValueError(
+                "provide --stadium1-assets, --stadium1-rom, --stadium2-rom, or --stadium2-cache"
+            )
         config = {
             "format": VIEWER_CONFIG_FORMAT,
             "providers": {
-                provider: {"assets": path}
+                provider: {kinds.get(provider, "assets"): path}
                 for provider, path in sorted(paths.items())
                 if provider in ("stadium1", "stadium2")
             },

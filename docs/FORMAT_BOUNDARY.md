@@ -21,5 +21,5 @@ animation slots become diagnostics rather than crashing the server. The
 renderer deliberately does not claim full game-renderer equivalence, exact
 runtime material state, or complete ROM-loading support.
 
-Stadium 1 currently requires an extracted pokemon_models directory. Stadium 2
+Stadium 1 can read the source-defined model archive directly from a user-owned ROM or use an extracted pokemon_models directory. Stadium 2
 can be prepared directly from a user-owned ROM with tools/setup_viewer.py.

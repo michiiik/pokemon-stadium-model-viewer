@@ -2,7 +2,7 @@
   "format": "pokemon-stadium-model-viewer-config-v1",
   "providers": {
     "stadium1": {
-      "assets": "../pokemon-stadium-assets/stadium1/pokemon_models"
+      "rom": "../pokemon-stadium-assets/pokemon-stadium-1.z64"
     },
     "stadium2": {
       "assets": "../pokemon-stadium-assets/stadium2"
