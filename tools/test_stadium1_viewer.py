@@ -202,6 +202,23 @@ class Stadium1ViewerChecks(unittest.TestCase):
         self.assertEqual(unpacked, b"TEST")
         self.assertEqual(info["fixups"], 0)
 
+    def test_stadium2_model_blob_decodes_before_pointer_scan(self) -> None:
+        payload = bytearray(build_fragment(animated=True, textured=False, translucent=False))
+        # S2 stores a pose-record index at this location. The source record is
+        # packed, so the index must be read after PERS-SZP/Yay0 decoding.
+        put_u32(payload, 0x200, 0)
+        control_count = (len(payload) + 31) // 32
+        packed = (
+            b"Yay0"
+            + struct.pack(">III", len(payload), 0x10 + control_count * 4, 0x10 + control_count * 4)
+            + b"".join(struct.pack(">I", 0xFFFFFFFF) for _ in range(control_count))
+            + bytes(payload)
+        )
+        wrapped = b"PERS-SZP" + struct.pack(">4I", 0x18, len(payload), len(payload), 0) + packed
+        decoded = viewer.decode_stadium2_model_blob(wrapped)
+        model = viewer.parse_resource(decoded, "packed S2 model", catalog_only=True)
+        self.assertEqual(viewer.Stadium2DataProvider._animation_slot_indices(model, decoded), [0])
+
     def test_binarchive(self) -> None:
         blob = bytearray(0x24)
         put_u32(blob, 8, len(blob))

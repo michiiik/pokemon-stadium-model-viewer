@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import http.server
 import json
 import math
@@ -50,6 +51,7 @@ STADIUM2_ARCHIVE_HEADER_SIZE = 0x10
 STADIUM2_ARCHIVE_ENTRY_SIZE = 0x10
 STADIUM1_MODEL_ARCHIVE_ROM_START = 0x00920000
 STADIUM1_MODEL_ARCHIVE_ROM_END = 0x015C0000
+STADIUM2_CATALOG_CACHE_FORMAT = "pms-stadium2-catalog-v1"
 
 N64_ROM_MAGIC_Z64 = b"\x80\x37\x12\x40"
 N64_ROM_MAGIC_V64 = b"\x37\x80\x40\x12"
@@ -1578,6 +1580,24 @@ def parse_fragment(data: bytes, name: str = "model", catalog_only: bool = False)
     return result
 
 
+def derived_cache_dir() -> Path:
+    """Return an OS cache directory outside the repository and ROM folders."""
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "pokemon-stadium-model-viewer" / "derived"
+    return Path.home() / ".cache" / "pokemon-stadium-model-viewer" / "derived"
+
+
+def decode_stadium2_model_blob(blob: bytes) -> bytes:
+    """Decode an S2 model record before interpreting model-local pointers."""
+    if blob[:8] == b"PERS-SZP":
+        payload, _ = unpack_persszp(blob)
+        return payload
+    if blob[:4] == b"Yay0":
+        return decode_yay0(blob)
+    return blob
+
+
 def parse_resource(blob: bytes, name: str = "resource", catalog_only: bool = False) -> Dict[str, Any]:
     """Parse a direct resource and return a JSON-safe catalog/model object."""
     try:
@@ -2060,6 +2080,10 @@ class Stadium2DataProvider:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
+        self._model_cache: Dict[str, Dict[str, Any]] = {}
+        self._rom_blob: Optional[bytes] = None
+        self._rom_sha256: Optional[str] = None
+        self._catalog_cache_path: Optional[Path] = None
         self._model_archive: Optional[Dict[str, Any]] = None
         self._pose_archive: Optional[Dict[str, Any]] = None
         self._model_blob: Optional[bytes] = None
@@ -2177,10 +2201,13 @@ class Stadium2DataProvider:
             candidates = ("pokemon_poses.bin", "pose_table.bin", "s2_poses.bin", "0x2d7d000.bin", "2d7d000.bin")
 
         def from_file(path: Path) -> Tuple[bytes, str]:
-            raw = path.read_bytes()
             name = path.name.casefold()
-            if len(raw) >= end and path.suffix.casefold() in (".z64", ".n64", ".rom"):
-                return raw[start:end], f"{path.name}@0x{start:X}"
+            if path.suffix.casefold() in (".z64", ".n64", ".v64", ".rom"):
+                raw = self._read_rom(path)
+                if len(raw) >= end:
+                    return raw[start:end], f"{path.name}@0x{start:X}"
+            else:
+                raw = path.read_bytes()
             if name == "437610.bin":
                 relative_start = start - 0x00437610
                 relative_end = end - 0x00437610
@@ -2203,6 +2230,17 @@ class Stadium2DataProvider:
             f"could not find the Stadium 2 {bank} bank; pass the full S2 ROM, 437610.bin, "
             f"or an extracted bank named {candidates[0]}"
         )
+
+    def _read_rom(self, path: Path) -> bytes:
+        if self._rom_blob is None:
+            self._rom_blob = normalize_n64_rom(path.read_bytes())
+            self._rom_sha256 = hashlib.sha256(self._rom_blob).hexdigest()
+            self._catalog_cache_path = derived_cache_dir() / f"stadium2-catalog-{self._rom_sha256}.json"
+        return self._rom_blob
+
+    @staticmethod
+    def _decoded_model_blob(blob: bytes) -> bytes:
+        return decode_stadium2_model_blob(blob)
 
     @staticmethod
     def _nested_pose_metadata(data: bytes, item: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2391,9 +2429,48 @@ class Stadium2DataProvider:
             animations.append(entry)
         return animations
 
+    def _load_catalog_cache(self) -> Optional[List[Dict[str, Any]]]:
+        path = self._catalog_cache_path
+        if path is None or not path.is_file() or not self._rom_sha256:
+            return None
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(cached, dict)
+                    or cached.get("format") != STADIUM2_CATALOG_CACHE_FORMAT
+                    or cached.get("sourceSha256") != self._rom_sha256
+                    or not isinstance(cached.get("models"), list)):
+                return None
+            return [dict(item) for item in cached["models"] if isinstance(item, dict)]
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _save_catalog_cache(self, entries: List[Dict[str, Any]]) -> None:
+        path = self._catalog_cache_path
+        if path is None or not self._rom_sha256:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "format": STADIUM2_CATALOG_CACHE_FORMAT,
+                "sourceSha256": self._rom_sha256,
+                "models": entries,
+            }
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(path)
+        except OSError as exc:
+            self.diagnostics.append({
+                "severity": "warning", "code": "s2-catalog-cache-write",
+                "message": f"could not write derived catalog cache: {exc}",
+            })
+
     def catalog(self) -> List[Dict[str, Any]]:
         if self._catalog_cache is not None:
             return self._catalog_cache
+        cached = self._load_catalog_cache()
+        if cached is not None:
+            self._catalog_cache = cached
+            return cached
         entries: List[Dict[str, Any]] = []
         if self._extracted_manifest is not None:
             for index in sorted(self._extracted_models):
@@ -2405,8 +2482,9 @@ class Stadium2DataProvider:
                 slot_indices: List[int] = []
                 try:
                     blob, _ = self._entry_blob(index)
-                    parsed = parse_resource(blob, f"Stadium 2 model {index:03d}", catalog_only=True)
-                    slot_indices = self._animation_slot_indices(parsed, blob)
+                    decoded = self._decoded_model_blob(blob)
+                    parsed = parse_resource(decoded, f"Stadium 2 model {index:03d}", catalog_only=True)
+                    slot_indices = self._animation_slot_indices(parsed, decoded)
                 except (FormatError, IndexError, OSError, struct.error):
                     pass
                 reference = f"s2-model:{index:03d}"
@@ -2421,9 +2499,11 @@ class Stadium2DataProvider:
                     "diagnostics": diagnostics,
                 })
             self._catalog_cache = entries
+            self._save_catalog_cache(entries)
             return entries
         if self._model_archive is None:
             self._catalog_cache = entries
+            self._save_catalog_cache(entries)
             return entries
         for item in self._model_archive["files"]:
             index = int(item["index"])
@@ -2432,8 +2512,9 @@ class Stadium2DataProvider:
             slot_indices: List[int] = []
             try:
                 blob, _ = self._entry_blob(index)
-                parsed = parse_resource(blob, f"Stadium 2 model {index:03d}", catalog_only=True)
-                slot_indices = self._animation_slot_indices(parsed, blob)
+                decoded = self._decoded_model_blob(blob)
+                parsed = parse_resource(decoded, f"Stadium 2 model {index:03d}", catalog_only=True)
+                slot_indices = self._animation_slot_indices(parsed, decoded)
                 diagnostics = list(parsed.get("diagnostics", [])) + diagnostics
                 if parsed.get("kind") != "model":
                     diagnostics.append({"severity": "error", "code": "s2-model-not-model",
@@ -2452,17 +2533,20 @@ class Stadium2DataProvider:
                 "diagnostics": diagnostics,
             })
         self._catalog_cache = entries
+        self._save_catalog_cache(entries)
         return entries
 
     def load_model(self, reference: str) -> Dict[str, Any]:
+        if reference in self._model_cache:
+            return self._model_cache[reference]
         index = self._reference_index(reference)
         blob, item = self._entry_blob(index)
-        model = parse_resource(blob, f"Stadium 2 model {index:03d}")
+        decoded = self._decoded_model_blob(blob)
+        model = parse_resource(decoded, f"Stadium 2 model {index:03d}")
         if model.get("kind") != "model":
             raise FormatError(f"Stadium 2 record {index} did not decode as a model")
         infer_stadium2_auxiliary_textures(model)
         apply_stadium2_runtime_tint(model, index)
-        pose_count = self._pose_counts[index] if index < len(self._pose_counts) else 0
         model_id = model.get("modelId", index)
         identity = model_identity("stadium2", model_id, reference, f"S2 model {index:03d}")
         model.update(identity)
@@ -2473,9 +2557,10 @@ class Stadium2DataProvider:
             model["s2ModelRecord"]["decodedSize"] = item["decodedSize"]
         if "extractedPath" in item:
             model["s2ModelRecord"]["extractedPath"] = item["extractedPath"]
-        model["animations"] = self._pose_animations(index, model, blob)
+        model["animations"] = self._pose_animations(index, model, decoded)
         model["animationSlotCount"] = int(model.get("animationSlotCount", 0) or 0)
         model.setdefault("diagnostics", []).extend(self._model_diagnostics(index))
+        self._model_cache[reference] = model
         return model
 
 
